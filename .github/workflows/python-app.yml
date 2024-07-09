@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -29,9 +30,16 @@ jobs:
     - name: Build with PyInstaller
       run: |
         pyinstaller --name biliTickerBuy --onefile main.py
+      shell: bash
+
+    - name: List files in dist directory
+      run: |
+        ls -alh dist/
+      shell: bash
 
     - name: Upload artifact
       uses: actions/upload-artifact@v2
       with:
         name: biliTickerBuy
         path: dist/biliTickerBuy.exe
+
