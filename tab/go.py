@@ -230,6 +230,7 @@ def go_tab():
             gr.update(),
             gr.update(),
         ]
+        last_prepare_time = time.time()
         while isRunning:
             try:
                 if time_start != "":
@@ -438,220 +439,225 @@ def go_tab():
                     gr.update(value="停止", visible=True),
                     return
 
-                # 数据准备
-                tickets_info = json.loads(tickets_info_str)
-                _request = main_request
-                token_payload = {
-                    "count": tickets_info["count"],
-                    "screen_id": tickets_info["screen_id"],
-                    "order_type": 1,
-                    "project_id": tickets_info["project_id"],
-                    "sku_id": tickets_info["sku_id"],
-                    "token": "",
-                    "newRisk": True,
-                }
-                # 订单准备
-                logger.info(f"1）订单准备")
-                request_result_normal = _request.post(
-                    url=f"https://show.bilibili.com/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
-                    data=token_payload,
-                )
-                request_result = request_result_normal.json()
-                logger.info(f"请求头: {request_result_normal.headers} // 请求体: {request_result}")
-                code = int(request_result["code"])
-                # 完成验证码
-                if code == -401:
-                    # if True:
-                    _url = "https://api.bilibili.com/x/gaia-vgate/v1/register"
-                    _payload = urlencode(request_result["data"]["ga_data"]["riskParams"])
-                    _data = _request.post(_url, _payload).json()
-                    logger.info(
-                        f"验证码请求: {_data}"
+                # 刷新余票状态
+                def check_tickets():
+                    tickets_info = json.loads(tickets_info_str)
+                    _request = main_request
+                    response = _request.post(
+                        url=f"https://show.bilibili.com/api/ticket/order/check?project_id={tickets_info['project_id']}",
+                        data={"screen_id": tickets_info["screen_id"]}
                     )
-                    csrf = _request.cookieManager.get_cookies_value("bili_jct")
-                    token = _data["data"]["token"]
-                    if _data["data"]["type"] == "geetest":
-                        gt = _data["data"]["geetest"]["gt"]
-                        challenge = _data["data"]["geetest"]["challenge"]
+                    result = response.json()
+                    for screen in result['data']['screen_list']:
+                        if screen['id'] == tickets_info['screen_id']:
+                            for ticket in screen['ticket_list']:
+                                if ticket['clickable']:
+                                    return True
+                    return False
+
+                # 订单准备
+                if time.time() - last_prepare_time > 15:
+                    last_prepare_time = time.time()
+                    logger.info(f"1）订单准备")
+                    request_result_normal = _request.post(
+                        url=f"https://show.bilibili.com/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
+                        data=token_payload,
+                    )
+                    request_result = request_result_normal.json()
+                    logger.info(f"请求头: {request_result_normal.headers} // 请求体: {request_result}")
+                    code = int(request_result["code"])
+                    if code == -401:
+                        _url = "https://api.bilibili.com/x/gaia-vgate/v1/register"
+                        _payload = urlencode(request_result["data"]["ga_data"]["riskParams"])
+                        _data = _request.post(_url, _payload).json()
+                        logger.info(
+                            f"验证码请求: {_data}"
+                        )
+                        csrf = _request.cookieManager.get_cookies_value("bili_jct")
+                        token = _data["data"]["token"]
+                        if _data["data"]["type"] == "geetest":
+                            gt = _data["data"]["geetest"]["gt"]
+                            challenge = _data["data"]["geetest"]["challenge"]
+                            geetest_validate = ""
+                            geetest_seccode = ""
+                            if ways_detail[select_way].have_gt_ui():
+                                logger.info(f"Using {ways_detail[select_way]}, have gt ui")
+                                yield [
+                                    gr.update(value=withTimeString("进行验证码验证"), visible=True),
+                                    gr.update(visible=True),
+                                    gr.update(),
+                                    gr.update(visible=True),
+                                    gr.update(value=gt),
+                                    gr.update(value=challenge),
+                                    gr.update(value=uuid.uuid1()),
+                                ]
+
+                            def run_validation():
+                                nonlocal geetest_validate, geetest_seccode
+                                try:
+                                    tmp = ways_detail[select_way].validate(appkey=api_key, gt=gt, challenge=challenge)
+                                except Exception as e:
+                                    return
+                                validate_con.acquire()
+                                geetest_validate = tmp
+                                geetest_seccode = geetest_validate + "|jordan"
+                                validate_con.notify()
+                                validate_con.release()
+
+                            validate_con.acquire()
+                            while geetest_validate == "" or geetest_seccode == "":
+                                threading.Thread(target=run_validation).start()
+                                yield [
+                                    gr.update(value=withTimeString(f"等待验证码完成， 使用{ways[select_way]}"),
+                                              visible=True),
+                                    gr.update(visible=True),
+                                    gr.update(),
+                                    gr.update(),
+                                    gr.update(),
+                                    gr.update(),
+                                    gr.update(),
+                                ]
+                                validate_con.wait()
+                            validate_con.release()
+                            logger.info(
+                                f"geetest_validate: {geetest_validate},geetest_seccode: {geetest_seccode}"
+                            )
+                            _url = "https://api.bilibili.com/x/gaia-vgate/v1/validate"
+                            _payload = {
+                                "challenge": challenge,
+                                "token": token,
+                                "seccode": geetest_seccode,
+                                "csrf": csrf,
+                                "validate": geetest_validate,
+                            }
+                            _data = _request.post(_url, urlencode(_payload)).json()
+                        elif _data["data"]["type"] == "phone":
+                            _payload = {
+                                "code": global_cookieManager.get_config_value("phone", ""),
+                                "csrf": csrf,
+                                "token": token,
+                            }
+                            _data = _request.post(_url, urlencode(_payload)).json()
+                        else:
+                            logger.warning("这个一个程序无法应对的验证码，脚本无法处理")
+                            break
+                        logger.info(f"validate: {_data}")
                         geetest_validate = ""
                         geetest_seccode = ""
-                        if ways_detail[select_way].have_gt_ui():
-                            logger.info(f"Using {ways_detail[select_way]}, have gt ui")
-                            yield [
-                                gr.update(value=withTimeString("进行验证码验证"), visible=True),
-                                gr.update(visible=True),
-                                gr.update(),
-                                gr.update(visible=True),
-                                gr.update(value=gt),
-                                gr.update(value=challenge),
-                                gr.update(value=uuid.uuid1()),
-                            ]
-
-                        def run_validation():
-                            nonlocal geetest_validate, geetest_seccode
-                            try:
-                                tmp = ways_detail[select_way].validate(appkey=api_key, gt=gt, challenge=challenge)
-                            except Exception as e:
-                                return
-                            validate_con.acquire()
-                            geetest_validate = tmp
-                            geetest_seccode = geetest_validate + "|jordan"
-                            validate_con.notify()
-                            validate_con.release()
-
-                        validate_con.acquire()
-                        while geetest_validate == "" or geetest_seccode == "":
-                            threading.Thread(target=run_validation).start()
-                            yield [
-                                gr.update(value=withTimeString(f"等待验证码完成， 使用{ways[select_way]}"),
-                                          visible=True),
-                                gr.update(visible=True),
-                                gr.update(),
-                                gr.update(),
-                                gr.update(),
-                                gr.update(),
-                                gr.update(),
-                            ]
-                            validate_con.wait()
-                        validate_con.release()
-                        logger.info(
-                            f"geetest_validate: {geetest_validate},geetest_seccode: {geetest_seccode}"
-                        )
-                        _url = "https://api.bilibili.com/x/gaia-vgate/v1/validate"
-                        _payload = {
-                            "challenge": challenge,
-                            "token": token,
-                            "seccode": geetest_seccode,
-                            "csrf": csrf,
-                            "validate": geetest_validate,
-                        }
-                        _data = _request.post(_url, urlencode(_payload)).json()
-                    elif _data["data"]["type"] == "phone":
-                        _payload = {
-                            "code": global_cookieManager.get_config_value("phone", ""),
-                            "csrf": csrf,
-                            "token": token,
-                        }
-                        _data = _request.post(_url, urlencode(_payload)).json()
-                    else:
-                        logger.warning("这个一个程序无法应对的验证码，脚本无法处理")
-                        break
-                    logger.info(f"validate: {_data}")
-                    geetest_validate = ""
-                    geetest_seccode = ""
-                    if _data["code"] == 0:
-                        logger.info("验证码成功")
-                        gr.update(value=withTimeString("验证码成功"), visible=True),
-                        gr.update(visible=True),
-                        gr.update(),
-                        gr.update(),
-                        gr.update(),
-                        gr.update(),
-                        gr.update(),
-                    else:
-                        logger.info("验证码失败 {}", _data)
-                        yield [
-                            gr.update(value=withTimeString("验证码失败。重新验证"), visible=True),
+                        if _data["code"] == 0:
+                            logger.info("验证码成功")
+                            gr.update(value=withTimeString("验证码成功"), visible=True),
                             gr.update(visible=True),
                             gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
-                        ]
-                        continue
-                    request_result = _request.post(
-                        url=f"https://show.bilibili.com/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
-                        data=token_payload,
-                    ).json()
-                    logger.info(f"prepare: {request_result}")
-                tickets_info["again"] = 1
-                tickets_info["token"] = request_result["data"]["token"]
-                logger.info(f"2）创建订单")
-                tickets_info["timestamp"] = int(time.time()) * 100
-                payload = format_dictionary_to_string(tickets_info)
+                        else:
+                            logger.info("验证码失败 {}", _data)
+                            yield [
+                                gr.update(value=withTimeString("验证码失败。重新验证"), visible=True),
+                                gr.update(visible=True),
+                                gr.update(),
+                                gr.update(),
+                                gr.update(),
+                                gr.update(),
+                                gr.update(),
+                            ]
+                            continue
+                        request_result = _request.post(
+                            url=f"https://show.bilibili.com/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
+                            data=token_payload,
+                        ).json()
+                        logger.info(f"prepare: {request_result}")
+                    tickets_info["again"] = 1
+                    tickets_info["token"] = request_result["data"]["token"]
+                if check_tickets():
+                    logger.info(f"2）创建订单")
+                    tickets_info["timestamp"] = int(time.time()) * 100
+                    payload = format_dictionary_to_string(tickets_info)
 
-                @retry.retry(exceptions=RequestException, tries=60, delay=interval / 1000)
-                def inner_request():
-                    if not isRunning:
-                        raise ValueError("抢票结束")
-                    ret = _request.post(
-                        url=f"https://show.bilibili.com/api/ticket/order/createV2?project_id={tickets_info['project_id']}",
-                        data=payload,
-                    ).json()
-                    err = int(ret["errno"])
-                    logger.info(
-                        f'状态码: {err}({ERRNO_DICT.get(err, "未知错误码")}), 请求体: {ret}'
-                    )
-                    if err == 0 or err == 100048 or err == 100079:
+                    @retry.retry(exceptions=RequestException, tries=60, delay=1)
+                    def inner_request():
+                        if not isRunning:
+                            raise ValueError("抢票结束")
+                        ret = _request.post(
+                            url=f"https://show.bilibili.com/api/ticket/order/createV2?project_id={tickets_info['project_id']}",
+                            data=payload,
+                        ).json()
+                        err = int(ret["errno"])
+                        logger.info(
+                            f'状态码: {err}({ERRNO_DICT.get(err, "未知错误码")}), 请求体: {ret}'
+                        )
+                        if err == 0 or err == 100048 or err == 100079:
+                            return ret, err
+                        if err == 100051:
+                            raise ValueError("token 过期")
+                        if err != 0:
+                            raise HTTPError("重试次数过多，重新准备订单")
                         return ret, err
-                    if err == 100051:
-                        raise ValueError("token 过期")
-                    if err != 0:
-                        raise HTTPError("重试次数过多，重新准备订单")
-                    return ret, err
 
-                request_result, errno = inner_request()
-                left_time_str = "无限" if mode == 0 else left_time
-                logger.info(
-                    f'状态码: {errno}({ERRNO_DICT.get(errno, "未知错误码")}), 请求体: {request_result} 剩余次数: {left_time_str}'
-                )
-                yield [
-                    gr.update(
-                        value=withTimeString(
-                            f"正在抢票，具体情况查看终端控制台。\n剩余次数: {left_time_str}\n当前状态码: {errno} ({ERRNO_DICT.get(errno, '未知错误码')})"),
-                        visible=True,
-                    ),
-                    gr.update(visible=True),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                    gr.update(),
-                ]
-                if errno == 0:
-                    logger.info(f"3）抢票成功")
-                    qrcode_url = get_qrcode_url(
-                        _request,
-                        request_result["data"]["orderId"],
+                    request_result, errno = inner_request()
+                    left_time_str = "无限" if mode == 0 else left_time
+                    logger.info(
+                        f'状态码: {errno}({ERRNO_DICT.get(errno, "未知错误码")}), 请求体: {request_result} 剩余次数: {left_time_str}'
                     )
-                    qr_gen = qrcode.QRCode()
-                    qr_gen.add_data(qrcode_url)
-                    qr_gen.make(fit=True)
-                    qr_gen_image = qr_gen.make_image()
                     yield [
-                        gr.update(value=withTimeString("生成付款二维码"), visible=True),
-                        gr.update(visible=False),
-                        gr.update(value=qr_gen_image.get_image(), visible=True),
+                        gr.update(
+                            value=withTimeString(
+                                f"正在抢票，具体情况查看终端控制台。\n剩余次数: {left_time_str}\n当前状态码: {errno} ({ERRNO_DICT.get(errno, '未知错误码')})"),
+                            visible=True,
+                        ),
+                        gr.update(visible=True),
+                        gr.update(),
                         gr.update(),
                         gr.update(),
                         gr.update(),
                         gr.update(),
                     ]
-                    plusToken = configDB.get("plusToken")
-                    if plusToken is not None and plusToken != "":
-                        PlusUtil.send_message(plusToken, "抢票成功", "前往订单中心付款吧")
-                    if audio_path != None:
-                        pygame.mixer.init()
-                        pygame.mixer.music.load(os.path.abspath(audio_path))
-                        logger.info("播放抢票成功提醒音频, 播放次数: "+ str(int(audio_repeat_times)))
-                        for i in range(0,int(audio_repeat_times)):
-                            audio_break_flag = False # True时停止播放
-                            pygame.mixer.music.play()
-                            while pygame.mixer.music.get_busy():
-                                # 等待音频播放完成
-                                pygame.time.wait(100)
-                                if not isRunning:
-                                    pygame.mixer.music.stop()
-                                    audio_break_flag = True
+                    if errno == 0:
+                        logger.info(f"3）抢票成功")
+                        qrcode_url = get_qrcode_url(
+                            _request,
+                            request_result["data"]["orderId"],
+                        )
+                        qr_gen = qrcode.QRCode()
+                        qr_gen.add_data(qrcode_url)
+                        qr_gen.make(fit=True)
+                        qr_gen_image = qr_gen.make_image()
+                        yield [
+                            gr.update(value=withTimeString("生成付款二维码"), visible=True),
+                            gr.update(visible=False),
+                            gr.update(value=qr_gen_image.get_image(), visible=True),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        ]
+                        plusToken = configDB.get("plusToken")
+                        if plusToken is not None and plusToken != "":
+                            PlusUtil.send_message(plusToken, "抢票成功", "前往订单中心付款吧")
+                        if audio_path != None:
+                            pygame.mixer.init()
+                            pygame.mixer.music.load(os.path.abspath(audio_path))
+                            logger.info("播放抢票成功提醒音频, 播放次数: "+ str(int(audio_repeat_times)))
+                            for i in range(0,int(audio_repeat_times)):
+                                audio_break_flag = False # True时停止播放
+                                pygame.mixer.music.play()
+                                while pygame.mixer.music.get_busy():
+                                    # 等待音频播放完成
+                                    pygame.time.wait(100)
+                                    if not isRunning:
+                                        pygame.mixer.music.stop()
+                                        audio_break_flag = True
+                                        break
+                                if audio_break_flag == True:
                                     break
-                            if audio_break_flag == True:
-                                break
-                    break
-                if mode == 1:
-                    left_time -= 1
-                    if left_time <= 0:
                         break
+                    if mode == 1:
+                        left_time -= 1
+                        if left_time <= 0:
+                            break
             except JSONDecodeError as e:
                 logger.error(f"配置文件格式错误: {e}")
                 return [
@@ -744,10 +750,10 @@ def go_tab():
                 </div>""",
             label="验证码",
         )
-    geetest_result = gr.JSON(visible=False)
+    geetest_result = gr.JSON(visible(False))
     time_tmp = gr.Textbox(visible=False)
-    gt_ui = gr.Textbox(visible=False)
-    challenge_ui = gr.Textbox(visible=False)
+    gt_ui = gr.Textbox(visible(False))
+    challenge_ui = gr.Textbox(visible(False))
     trigger.change(
         fn=None,
         inputs=[gt_ui, challenge_ui],
