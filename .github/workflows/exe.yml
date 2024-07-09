@@ -1,0 +1,36 @@
+name: Python application
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --name biliTickerBuy --onefile main.py
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: biliTickerBuy
+        path: dist/biliTickerBuy.exe
